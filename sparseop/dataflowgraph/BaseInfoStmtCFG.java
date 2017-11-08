@@ -9,10 +9,10 @@ import java.util.*;
 /**
  * @author wanglei
  */
-public class BaseDataFlowCFG implements DirectedGraph {
-    private HashMap<BasicBlock, Set<VariableInfo>> bbToBaseInfoMap = null;
+public class BaseInfoStmtCFG implements DirectedGraph {
+    private HashMap<BasicBlock, Set<BaseInfoStmt>> bbToBaseInfoMap = null;
 
-    public BaseDataFlowCFG(HashMap<BasicBlock, Set<VariableInfo>> bbToBaseInfoMap) {
+    public BaseInfoStmtCFG(HashMap<BasicBlock, Set<BaseInfoStmt>> bbToBaseInfoMap) {
         this.bbToBaseInfoMap = bbToBaseInfoMap;
     }
 
@@ -22,12 +22,12 @@ public class BaseDataFlowCFG implements DirectedGraph {
             dfs(head, null, visited);
         }
     }
-    private void dfs(BasicBlock bb, VariableInfo pre, Set<BasicBlock> visited) {
+    private void dfs(BasicBlock bb, BaseInfoStmt pre, Set<BasicBlock> visited) {
         if(visited.contains(bb))
             return ;
         visited.add(bb);
-        Pair<VariableInfo, VariableInfo> ret = innerBasicBlock(bb);
-        VariableInfo tail = null;
+        Pair<BaseInfoStmt, BaseInfoStmt> ret = innerBasicBlock(bb);
+        BaseInfoStmt tail = null;
         if(ret == null) {
             tail = pre;
         }else {
@@ -48,13 +48,13 @@ public class BaseDataFlowCFG implements DirectedGraph {
     }
 
     public void solve() {
-        Map<BasicBlock, Pair<VariableInfo, VariableInfo> > result = new HashMap<>();
+        Map<BasicBlock, Pair<BaseInfoStmt, BaseInfoStmt> > result = new HashMap<>();
         for(BasicBlock bb : bbToBaseInfoMap.keySet()) {
             solverBB(bb, result);
         }
     }
-    private void solverBB(BasicBlock bb, Map<BasicBlock, Pair<VariableInfo, VariableInfo> > result) {
-        Pair<VariableInfo, VariableInfo> ret = null;
+    private void solverBB(BasicBlock bb, Map<BasicBlock, Pair<BaseInfoStmt, BaseInfoStmt> > result) {
+        Pair<BaseInfoStmt, BaseInfoStmt> ret = null;
         if(result.containsKey(bb)) {
             ret = result.get(bb);
         }else {
@@ -63,20 +63,20 @@ public class BaseDataFlowCFG implements DirectedGraph {
                 result.put(bb, ret);
         }
 
-        VariableInfo tail = ret.getO2();
+        BaseInfoStmt tail = ret.getO2();
         Set<BasicBlock> visited = new HashSet<>();
         for(BasicBlock succ : bb.getSuccs()) {
             subSolverBB(succ, tail, result, visited);
         }
 
     }
-    private void subSolverBB(BasicBlock bb, VariableInfo preTail, Map<BasicBlock,
-            Pair<VariableInfo, VariableInfo> > result, Set<BasicBlock> visited ) {
+    private void subSolverBB(BasicBlock bb, BaseInfoStmt preTail, Map<BasicBlock,
+            Pair<BaseInfoStmt, BaseInfoStmt> > result, Set<BasicBlock> visited ) {
         if(visited.contains(bb))
             return ;
         visited.add(bb);
 
-        Pair<VariableInfo, VariableInfo> ret = null;
+        Pair<BaseInfoStmt, BaseInfoStmt> ret = null;
         if(result.containsKey(bb)) {
             ret = result.get(bb);
         }else {
@@ -91,7 +91,7 @@ public class BaseDataFlowCFG implements DirectedGraph {
             return;
         }
 
-        VariableInfo tail = null;
+        BaseInfoStmt tail = null;
         if(ret == null)
             tail = preTail;
         else
@@ -102,19 +102,19 @@ public class BaseDataFlowCFG implements DirectedGraph {
 
     }
 
-    private  Pair<VariableInfo, VariableInfo> innerBasicBlock(BasicBlock bb) {
+    private  Pair<BaseInfoStmt, BaseInfoStmt> innerBasicBlock(BasicBlock bb) {
         if(!bbToBaseInfoMap.containsKey(bb))
             return null;
 
-        List<VariableInfo> col = new ArrayList<>(bbToBaseInfoMap.get(bb));
-        Collections.sort(col, new Comparator<VariableInfo>() {
-            public int compare(VariableInfo arg0, VariableInfo arg1) {
+        List<BaseInfoStmt> col = new ArrayList<>(bbToBaseInfoMap.get(bb));
+        Collections.sort(col, new Comparator<BaseInfoStmt>() {
+            public int compare(BaseInfoStmt arg0, BaseInfoStmt arg1) {
                 return arg0.idx - arg1.idx;
             }
         });
-        VariableInfo head = null;
-        VariableInfo tail = null;
-        VariableInfo pre = null;
+        BaseInfoStmt head = null;
+        BaseInfoStmt tail = null;
+        BaseInfoStmt pre = null;
         for(int i = 0; i < col.size(); i++) {
             if(i == 0) {
                 head = col.get(i);
@@ -131,6 +131,9 @@ public class BaseDataFlowCFG implements DirectedGraph {
             pre = col.get(i);
 
         }
+//        if(bb.getSuccs().size() == 0)
+//            tail.returnStmt = bb.getTail();
+
         return new Pair<>(head, tail);
     }
 

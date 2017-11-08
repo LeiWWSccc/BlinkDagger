@@ -14,7 +14,7 @@ import heros.solver.Pair;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import soot.*;
-import soot.jimple.*;
+import soot.jimple.Stmt;
 import soot.jimple.infoflow.InfoflowConfiguration.CallgraphAlgorithm;
 import soot.jimple.infoflow.InfoflowConfiguration.CodeEliminationMode;
 import soot.jimple.infoflow.aliasing.FlowSensitiveAliasStrategy;
@@ -49,14 +49,13 @@ import soot.jimple.infoflow.solver.cfg.IInfoflowCFG;
 import soot.jimple.infoflow.solver.cfg.InfoflowCFG;
 import soot.jimple.infoflow.solver.fastSolver.BackwardsInfoflowSolver;
 import soot.jimple.infoflow.solver.fastSolver.InfoflowSolver;
-import soot.jimple.infoflow.solver.fastSolver.InfoflowSparseOPSolver;
 import soot.jimple.infoflow.source.ISourceSinkManager;
-import soot.jimple.infoflow.sparseop.basicblock.BasicBlock;
-import soot.jimple.infoflow.sparseop.basicblock.BasicBlockGraph;
+import soot.jimple.infoflow.sparseop.dataflowgraph.BaseInfoStmt;
 import soot.jimple.infoflow.sparseop.dataflowgraph.DataFlowNode;
-import soot.jimple.infoflow.sparseop.dataflowgraph.VariableInfo;
-import soot.jimple.infoflow.sparseop.dataflowgraph.VariableInfoSet;
-import soot.jimple.infoflow.util.BaseSelector;
+import soot.jimple.infoflow.sparseop.dataflowgraph.InnerBBFastBuildDFGSolver;
+import soot.jimple.infoflow.sparseop.dataflowgraph.data.DFGEntryKey;
+import soot.jimple.infoflow.sparseop.problem.InfoflowSPProblem;
+import soot.jimple.infoflow.sparseop.solver.InfoflowSparseOPSolver;
 import soot.jimple.infoflow.util.SootMethodRepresentationParser;
 import soot.jimple.infoflow.util.SystemClassHandler;
 import soot.jimple.toolkits.callgraph.ReachableMethods;
@@ -141,7 +140,8 @@ public class Infoflow extends AbstractInfoflow {
 		Scene.v().setEntryPoints(Collections.singletonList(entryPointCreator.createDummyMain()));
 
 		// Run the analysis
-        runAnalysis(sourcesSinks, null);
+        //runAnalysis(sourcesSinks, null);
+        runAnalysisOp(sourcesSinks, null);
 	}
 
 	@Override
@@ -177,7 +177,7 @@ public class Infoflow extends AbstractInfoflow {
 		ipcManager.updateJimpleForICC();
 
 		// Run the analysis
-        runAnalysis(sourcesSinks, seeds);
+        runAnalysisOp(sourcesSinks, seeds);
 	}
 
 	void computInfoflowForTest(String appPath, String libPath, Collection<String> classes, ISourceSinkManager sourcesSinks) {
@@ -197,7 +197,327 @@ public class Infoflow extends AbstractInfoflow {
 		BiDiInterproceduralCFG<Unit, SootMethod> baseICFG  = new JimpleBasedInterproceduralCFG(true);
 		iCfg = new InfoflowCFG(baseICFG) ;
 
-		runAnalysis(sourcesSinks , null ) ;
+		//runAnalysis(sourcesSinks , null ) ;
+		runAnalysisOp(sourcesSinks , null ) ;
+	}
+
+
+	private void runAnalysis(final ISourceSinkManager sourcesSinks, final Set<String> additionalSeeds) {
+		// Clear the data from previous runs
+		maxMemoryConsumption = -1;
+		results = null;
+
+		// Some configuration options do not really make sense in combination
+		if (config.getEnableStaticFieldTracking()
+				&& InfoflowConfiguration.getAccessPathLength() == 0)
+			throw new RuntimeException("Static field tracking must be disabled "
+					+ "if the access path length is zero");
+		if (InfoflowConfiguration.getAccessPathLength() < 0)
+			throw new RuntimeException("The access path length may not be negative");
+
+		// Clear the base registrations from previous runs
+		AccessPathFactory.v().clearBaseRegister();
+
+		// Build the callgraph
+		long beforeCallgraph = System.nanoTime();
+		constructCallgraph();
+		logger.info("Callgraph construction took " + (System.nanoTime() - beforeCallgraph) / 1E9
+				+ " seconds");
+
+		// Perform constant propagation and remove dead code
+		if (config.getCodeEliminationMode() != CodeEliminationMode.NoCodeElimination) {
+			long currentMillis = System.nanoTime();
+			eliminateDeadCode(sourcesSinks);
+			logger.info("Dead code elimination took " + (System.nanoTime() - currentMillis) / 1E9
+					+ " seconds");
+		}
+
+		if (config.getCallgraphAlgorithm() != CallgraphAlgorithm.OnDemand)
+			logger.info("Callgraph has {} edges", Scene.v().getCallGraph().size());
+
+		if (!config.isTaintAnalysisEnabled()) {
+			return;
+		}
+		logger.info("Starting Taint Analysis");
+		iCfg = icfgFactory.buildBiDirICFG(config.getCallgraphAlgorithm(),
+				config.getEnableExceptionTracking());
+
+		//int numThreads = Runtime.getRuntime().availableProcessors();
+		int numThreads = 1;
+		CountingThreadPoolExecutor executor = createExecutor(numThreads);
+
+		// Initialize the memory manager
+		PathDataErasureMode erasureMode = PathDataErasureMode.EraseAll;
+		if (pathBuilderFactory.isContextSensitive())
+			erasureMode = PathDataErasureMode.KeepOnlyContextData;
+		if (pathBuilderFactory.supportsPathReconstruction())
+			erasureMode = PathDataErasureMode.EraseNothing;
+		IMemoryManager<Abstraction> memoryManager = new FlowDroidMemoryManager(false,
+				erasureMode);
+
+		// Initialize the data flow manager
+		InfoflowManager manager = new InfoflowManager(config, null, iCfg, sourcesSinks,
+				taintWrapper, hierarchy);
+
+		BackwardsInfoflowProblem backProblem = null;
+		InfoflowManager backwardsManager = null;
+		InfoflowSolver backSolver = null;
+		final IAliasingStrategy aliasingStrategy;
+		switch (getConfig().getAliasingAlgorithm()) {
+			case FlowSensitive:
+				backwardsManager = new InfoflowManager(config, null,
+						new BackwardsInfoflowCFG(iCfg), sourcesSinks, taintWrapper, hierarchy);
+				backProblem = new BackwardsInfoflowProblem(backwardsManager);
+				backSolver = new BackwardsInfoflowSolver(backProblem, executor);
+				backSolver.setMemoryManager(memoryManager);
+				backSolver.setJumpPredecessors(!pathBuilderFactory.supportsPathReconstruction());
+//				backSolver.setEnableMergePointChecking(true);
+
+				aliasingStrategy = new FlowSensitiveAliasStrategy(iCfg, backSolver);
+				break;
+			case PtsBased:
+				backProblem = null;
+				backSolver = null;
+				aliasingStrategy = new PtsBasedAliasStrategy(iCfg);
+				break;
+			default:
+				throw new RuntimeException("Unsupported aliasing algorithm");
+		}
+
+		// Get the zero fact
+		Abstraction zeroValue = backProblem != null
+				? backProblem.createZeroValue() : null;
+		InfoflowProblem forwardProblem  = new InfoflowProblem(manager,
+				aliasingStrategy, zeroValue);
+
+		// Set the options
+		InfoflowSolver forwardSolver = new InfoflowSolver(forwardProblem, executor);
+		aliasingStrategy.setForwardSolver(forwardSolver);
+		manager.setForwardSolver(forwardSolver);
+		if (backwardsManager != null)
+			backwardsManager.setForwardSolver(forwardSolver);
+
+		forwardSolver.setMemoryManager(memoryManager);
+		forwardSolver.setJumpPredecessors(!pathBuilderFactory.supportsPathReconstruction());
+//		forwardSolver.setEnableMergePointChecking(true);
+
+		forwardProblem.setTaintPropagationHandler(taintPropagationHandler);
+		forwardProblem.setTaintWrapper(taintWrapper);
+		if (nativeCallHandler != null)
+			forwardProblem.setNativeCallHandler(nativeCallHandler);
+
+		if (backProblem != null) {
+			backProblem.setForwardSolver(forwardSolver);
+			backProblem.setTaintPropagationHandler(backwardsPropagationHandler);
+			backProblem.setTaintWrapper(taintWrapper);
+			if (nativeCallHandler != null)
+				backProblem.setNativeCallHandler(nativeCallHandler);
+			backProblem.setActivationUnitsToCallSites(forwardProblem);
+		}
+
+		// Print our configuration
+		config.printSummary();
+		if (config.getFlowSensitiveAliasing() && !aliasingStrategy.isFlowSensitive())
+			logger.warn("Trying to use a flow-sensitive aliasing with an "
+					+ "aliasing strategy that does not support this feature");
+
+		// We have to look through the complete program to find sources
+		// which are then taken as seeds.
+		int sinkCount = 0;
+		logger.info("Looking for sources and sinks...");
+
+		for (SootMethod sm : getMethodsForSeeds(iCfg))
+			sinkCount += scanMethodForSourcesSinks(sourcesSinks, forwardProblem, sm);
+
+		// We optionally also allow additional seeds to be specified
+		if (additionalSeeds != null)
+			for (String meth : additionalSeeds) {
+				SootMethod m = Scene.v().getMethod(meth);
+				if (!m.hasActiveBody()) {
+					logger.warn("Seed method {} has no active body", m);
+					continue;
+				}
+				forwardProblem.addInitialSeeds(m.getActiveBody().getUnits().getFirst(),
+						Collections.singleton(forwardProblem.zeroValue()));
+			}
+
+		// Report on the sources and sinks we have found
+		if (!forwardProblem.hasInitialSeeds()) {
+			logger.error("No sources found, aborting analysis");
+			return;
+		}
+		if (sinkCount == 0) {
+			logger.error("No sinks found, aborting analysis");
+			return;
+		}
+		logger.info("Source lookup done, found {} sources and {} sinks.", forwardProblem.getInitialSeeds().size(),
+				sinkCount);
+
+		// Initialize the taint wrapper if we have one
+		if (taintWrapper != null)
+			taintWrapper.initialize(manager);
+		if (nativeCallHandler != null)
+			nativeCallHandler.initialize(manager);
+
+		// Register the handler for interim results
+		TaintPropagationResults propagationResults = forwardProblem.getResults();
+		final CountingThreadPoolExecutor resultExecutor = createExecutor(numThreads);
+		final IAbstractionPathBuilder builder = pathBuilderFactory.createPathBuilder(
+				resultExecutor, iCfg);
+
+		if (config.getIncrementalResultReporting()) {
+			// Create the path builder
+			this.results = new InfoflowResults();
+			propagationResults.addResultAvailableHandler(new OnTaintPropagationResultAdded() {
+
+				@Override
+				public boolean onResultAvailable(AbstractionAtSink abs) {
+					builder.addResultAvailableHandler(new OnPathBuilderResultAvailable() {
+
+						@Override
+						public void onResultAvailable(ResultSourceInfo source, ResultSinkInfo sink) {
+							// Notify our external handlers
+							for (ResultsAvailableHandler handler : onResultsAvailable) {
+								if (handler instanceof ResultsAvailableHandler2) {
+									ResultsAvailableHandler2 handler2 = (ResultsAvailableHandler2) handler;
+									handler2.onSingleResultAvailable(source, sink);
+								}
+							}
+							results.addResult(sink, source);
+						}
+
+					});
+
+					// Compute the result paths
+					builder.computeTaintPaths(Collections.singleton(abs));
+					return true;
+				}
+
+			});
+		}
+
+		long beforeFsolver = System.nanoTime();
+		forwardSolver.solve();
+		logger.info("Threads : " + numThreads);
+		logger.info("Taint fSolver took " + (System.nanoTime() - beforeFsolver) / 1E9
+				+ " seconds");
+		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
+
+		// Not really nice, but sometimes Heros returns before all
+		// executor tasks are actually done. This way, we give it a
+		// chance to terminate gracefully before moving on.
+		int terminateTries = 0;
+		while (terminateTries < 10) {
+			if (executor.getActiveCount() != 0 || !executor.isTerminated()) {
+				terminateTries++;
+				try {
+					Thread.sleep(500);
+				}
+				catch (InterruptedException e) {
+					logger.error("Could not wait for executor termination", e);
+				}
+			}
+			else
+				break;
+		}
+		if (executor.getActiveCount() != 0 || !executor.isTerminated())
+			logger.error("Executor did not terminate gracefully");
+
+		// Print taint wrapper statistics
+		if (taintWrapper != null) {
+			logger.info("Taint wrapper hits: " + taintWrapper.getWrapperHits());
+			logger.info("Taint wrapper misses: " + taintWrapper.getWrapperMisses());
+		}
+
+		Set<AbstractionAtSink> res = propagationResults.getResults();
+
+		// We need to prune access paths that are entailed by another one
+		for (Iterator<AbstractionAtSink> absAtSinkIt = res.iterator(); absAtSinkIt.hasNext(); ) {
+			AbstractionAtSink curAbs = absAtSinkIt.next();
+			for (AbstractionAtSink checkAbs : res)
+				if (checkAbs != curAbs
+						&& checkAbs.getSinkStmt() == curAbs.getSinkStmt()
+						&& checkAbs.getAbstraction().isImplicit() == curAbs.getAbstraction().isImplicit()
+						&& checkAbs.getAbstraction().getSourceContext() == curAbs.getAbstraction().getSourceContext())
+					if (checkAbs.getAbstraction().getAccessPath().entails(
+							curAbs.getAbstraction().getAccessPath())) {
+						absAtSinkIt.remove();
+						break;
+					}
+		}
+
+		logger.info("IFDS problem with {} forward and {} backward edges solved, "
+						+ "processing {} results...", forwardSolver.propagationCount,
+				backSolver == null ? 0 : backSolver.propagationCount,
+				res == null ? 0 : res.size());
+
+		// Force a cleanup. Everything we need is reachable through the
+		// results set, the other abstractions can be killed now.
+		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
+		forwardSolver.cleanup();
+		if (backSolver != null) {
+			backSolver.cleanup();
+			backSolver = null;
+			backProblem = null;
+		}
+		forwardSolver = null;
+		forwardProblem = null;
+		Runtime.getRuntime().gc();
+
+		if (!config.getIncrementalResultReporting()) {
+			builder.computeTaintPaths(res);
+			if (this.results == null)
+				this.results = builder.getResults();
+			else
+				this.results.addAll(builder.getResults());
+		}
+
+		// Wait for the path builders to terminate
+		try {
+			resultExecutor.awaitCompletion();
+		} catch (InterruptedException e) {
+			logger.error("Could not wait for executor termination", e);
+		}
+
+		if (config.getIncrementalResultReporting()) {
+			// After the last intermediate result has been computed, we need to
+			// re-process those abstractions that received new neighbors in the
+			// meantime
+			builder.runIncrementalPathCompuation();
+
+			try {
+				resultExecutor.awaitCompletion();
+			} catch (InterruptedException e) {
+				logger.error("Could not wait for executor termination", e);
+			}
+		}
+		resultExecutor.shutdown();
+
+		if (results == null || results.getResults().isEmpty())
+			logger.warn("No results found.");
+		else for (ResultSinkInfo sink : results.getResults().keySet()) {
+			logger.info("The sink {} in method {} was called with values from the following sources:",
+					sink, iCfg.getMethodOf(sink.getSink()).getSignature() );
+			for (ResultSourceInfo source : results.getResults().get(sink)) {
+				logger.info("- {} in method {}",source, iCfg.getMethodOf(source.getSource()).getSignature());
+				if (source.getPath() != null) {
+					logger.info("\ton Path: ");
+					for (Unit p : source.getPath()) {
+						logger.info("\t -> " + iCfg.getMethodOf(p));
+						logger.info("\t\t -> " + p);
+					}
+				}
+			}
+		}
+
+		for (ResultsAvailableHandler handler : onResultsAvailable)
+			handler.onResultsAvailable(iCfg, results);
+
+		if (config.getWriteOutputFiles())
+			PackManager.v().writeOutput();
+
+		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
+		System.out.println("Maximum memory consumption: " + maxMemoryConsumption / 1E6 + " MB");
 	}
 
 	/**
@@ -214,7 +534,7 @@ public class Infoflow extends AbstractInfoflow {
 	 * @param additionalSeeds Additional seeds at which to create A ZERO fact
 	 * even if they are not sources
 	 */
-	private void runAnalysis(final ISourceSinkManager sourcesSinks, final Set<String> additionalSeeds) {
+	private void runAnalysisOp(final ISourceSinkManager sourcesSinks, final Set<String> additionalSeeds) {
 		// Clear the data from previous runs
 		maxMemoryConsumption = -1;
 		results = null;
@@ -273,18 +593,18 @@ public class Infoflow extends AbstractInfoflow {
 
 		// sparse op ///////////////////////////////////////////////////////////
 		// 1
-		logger.info("print all variables in Jimple");
+
 
 		HashMap<SootMethod, SootMethod> methodToCallBack = new HashMap<>();
+		logger.info("Starting Data Flow Graph building!");
+		long beforeDfgBuild = System.nanoTime();
 
-		long beforePreprocess = System.nanoTime();
-
-		Map<SootMethod, Map<Value, Map<Pair<Unit, Value>, Pair<VariableInfo, DataFlowNode>>>> dfg = new HashMap<>();
-		for (SootMethod sm : getMethodsForSeeds(iCfg))
-			scanMethodDoPreAnalysis(sm, dfg);
+		InnerBBFastBuildDFGSolver dfgSolver = new InnerBBFastBuildDFGSolver(iCfg);
+		Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>>
+				dfg = dfgSolver.solve();
 		manager.setDfg(dfg);
 
-		logger.info("Data Flow Graph took " + (System.nanoTime() - beforePreprocess) / 1E9
+		logger.info("Data Flow Graph building took " + (System.nanoTime() - beforeDfgBuild) / 1E9
 				+ " seconds");
 
 		/*
@@ -318,7 +638,7 @@ public class Infoflow extends AbstractInfoflow {
 		// Get the zero fact
 		Abstraction zeroValue = backProblem != null
 				? backProblem.createZeroValue() : null;
-		InfoflowProblem forwardProblem  = new InfoflowProblem(manager,
+		InfoflowSPProblem forwardProblem  = new InfoflowSPProblem(manager,
 				aliasingStrategy, zeroValue);
 
 		// Set the options
@@ -331,7 +651,6 @@ public class Infoflow extends AbstractInfoflow {
 		//sparse op
 		forwardSolver.setDfg(dfg);
 
-
 		forwardSolver.setMemoryManager(memoryManager);
 		forwardSolver.setJumpPredecessors(!pathBuilderFactory.supportsPathReconstruction());
 //		forwardSolver.setEnableMergePointChecking(true);
@@ -341,14 +660,14 @@ public class Infoflow extends AbstractInfoflow {
 		if (nativeCallHandler != null)
 			forwardProblem.setNativeCallHandler(nativeCallHandler);
 
-		if (backProblem != null) {
-			backProblem.setForwardSolver(forwardSolver);
-			backProblem.setTaintPropagationHandler(backwardsPropagationHandler);
-			backProblem.setTaintWrapper(taintWrapper);
-			if (nativeCallHandler != null)
-				backProblem.setNativeCallHandler(nativeCallHandler);
-			backProblem.setActivationUnitsToCallSites(forwardProblem);
-		}
+//		if (backProblem != null) {
+//			backProblem.setForwardSolver(forwardSolver);
+//			backProblem.setTaintPropagationHandler(backwardsPropagationHandler);
+//			backProblem.setTaintWrapper(taintWrapper);
+//			if (nativeCallHandler != null)
+//				backProblem.setNativeCallHandler(nativeCallHandler);
+//			backProblem.setActivationUnitsToCallSites(forwardProblem);
+//		}
 
 		// Print our configuration
 		config.printSummary();
@@ -362,7 +681,7 @@ public class Infoflow extends AbstractInfoflow {
         logger.info("Looking for sources and sinks...");
 
         for (SootMethod sm : getMethodsForSeeds(iCfg))
-			sinkCount += scanMethodForSourcesSinks(sourcesSinks, forwardProblem, sm);
+			sinkCount += scanMethodForSourcesSinksOp(sourcesSinks, forwardProblem, sm);
 
 		// We optionally also allow additional seeds to be specified
 		if (additionalSeeds != null)
@@ -432,124 +751,128 @@ public class Infoflow extends AbstractInfoflow {
 		}
 
 
+		long beforeFsolver = System.nanoTime();
 		forwardSolver.solve();
+		logger.info("Threads : " + numThreads);
+		logger.info("Taint OPfSolver took " + (System.nanoTime() - beforeFsolver) / 1E9
+				+ " seconds");
 		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
-//
-//		// Not really nice, but sometimes Heros returns before all
-//		// executor tasks are actually done. This way, we give it a
-//		// chance to terminate gracefully before moving on.
-//		int terminateTries = 0;
-//		while (terminateTries < 10) {
-//			if (executor.getActiveCount() != 0 || !executor.isTerminated()) {
-//				terminateTries++;
-//				try {
-//					Thread.sleep(500);
-//				}
-//				catch (InterruptedException e) {
-//					logger.error("Could not wait for executor termination", e);
-//				}
-//			}
-//			else
-//				break;
-//		}
-//		if (executor.getActiveCount() != 0 || !executor.isTerminated())
-//			logger.error("Executor did not terminate gracefully");
-//
-//		// Print taint wrapper statistics
-//		if (taintWrapper != null) {
-//			logger.info("Taint wrapper hits: " + taintWrapper.getWrapperHits());
-//			logger.info("Taint wrapper misses: " + taintWrapper.getWrapperMisses());
-//		}
-//
-//		Set<AbstractionAtSink> res = propagationResults.getResults();
-//
-//		// We need to prune access paths that are entailed by another one
-//		for (Iterator<AbstractionAtSink> absAtSinkIt = res.iterator(); absAtSinkIt.hasNext(); ) {
-//			AbstractionAtSink curAbs = absAtSinkIt.next();
-//			for (AbstractionAtSink checkAbs : res)
-//				if (checkAbs != curAbs
-//						&& checkAbs.getSinkStmt() == curAbs.getSinkStmt()
-//						&& checkAbs.getAbstraction().isImplicit() == curAbs.getAbstraction().isImplicit()
-//						&& checkAbs.getAbstraction().getSourceContext() == curAbs.getAbstraction().getSourceContext())
-//					if (checkAbs.getAbstraction().getAccessPath().entails(
-//							curAbs.getAbstraction().getAccessPath())) {
-//						absAtSinkIt.remove();
-//						break;
-//					}
-//		}
-//
-//		logger.info("IFDS problem with {} forward and {} backward edges solved, "
-//				+ "processing {} results...", forwardSolver.propagationCount,
-//				backSolver == null ? 0 : backSolver.propagationCount,
-//				res == null ? 0 : res.size());
-//
-//		// Force a cleanup. Everything we need is reachable through the
-//		// results set, the other abstractions can be killed now.
-//		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
-//		forwardSolver.cleanup();
-//		if (backSolver != null) {
-//			backSolver.cleanup();
-//			backSolver = null;
-//			backProblem = null;
-//		}
-//		forwardSolver = null;
-//		forwardProblem = null;
-//		Runtime.getRuntime().gc();
-//
-//		if (!config.getIncrementalResultReporting()) {
-//	   		builder.computeTaintPaths(res);
-//	   		if (this.results == null)
-//	   			this.results = builder.getResults();
-//	   		else
-//	   			this.results.addAll(builder.getResults());
-//		}
-//
-//		// Wait for the path builders to terminate
-//		try {
-//			resultExecutor.awaitCompletion();
-//		} catch (InterruptedException e) {
-//			logger.error("Could not wait for executor termination", e);
-//		}
-//
-//		if (config.getIncrementalResultReporting()) {
-//			// After the last intermediate result has been computed, we need to
-//			// re-process those abstractions that received new neighbors in the
-//			// meantime
-//			builder.runIncrementalPathCompuation();
-//
-//			try {
-//				resultExecutor.awaitCompletion();
-//			} catch (InterruptedException e) {
-//				logger.error("Could not wait for executor termination", e);
-//			}
-//		}
-//		resultExecutor.shutdown();
-//
-//		if (results == null || results.getResults().isEmpty())
-//			logger.warn("No results found.");
-//		else for (ResultSinkInfo sink : results.getResults().keySet()) {
-//			logger.info("The sink {} in method {} was called with values from the following sources:",
-//                    sink, iCfg.getMethodOf(sink.getSink()).getSignature() );
-//			for (ResultSourceInfo source : results.getResults().get(sink)) {
-//				logger.info("- {} in method {}",source, iCfg.getMethodOf(source.getSource()).getSignature());
-//				if (source.getPath() != null) {
-//					logger.info("\ton Path: ");
-//					for (Unit p : source.getPath()) {
-//						logger.info("\t -> " + iCfg.getMethodOf(p));
-//						logger.info("\t\t -> " + p);
-//					}
-//				}
-//			}
-//		}
-//
-//		for (ResultsAvailableHandler handler : onResultsAvailable)
-//			handler.onResultsAvailable(iCfg, results);
-//
-//		if (config.getWriteOutputFiles())
-//			PackManager.v().writeOutput();
-//
-//		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
-//		System.out.println("Maximum memory consumption: " + maxMemoryConsumption / 1E6 + " MB");
+
+		// Not really nice, but sometimes Heros returns before all
+		// executor tasks are actually done. This way, we give it a
+		// chance to terminate gracefully before moving on.
+		int terminateTries = 0;
+		while (terminateTries < 10) {
+			if (executor.getActiveCount() != 0 || !executor.isTerminated()) {
+				terminateTries++;
+				try {
+					Thread.sleep(500);
+				}
+				catch (InterruptedException e) {
+					logger.error("Could not wait for executor termination", e);
+				}
+			}
+			else
+				break;
+		}
+		if (executor.getActiveCount() != 0 || !executor.isTerminated())
+			logger.error("Executor did not terminate gracefully");
+
+		// Print taint wrapper statistics
+		if (taintWrapper != null) {
+			logger.info("Taint wrapper hits: " + taintWrapper.getWrapperHits());
+			logger.info("Taint wrapper misses: " + taintWrapper.getWrapperMisses());
+		}
+
+		Set<AbstractionAtSink> res = propagationResults.getResults();
+
+		// We need to prune access paths that are entailed by another one
+		for (Iterator<AbstractionAtSink> absAtSinkIt = res.iterator(); absAtSinkIt.hasNext(); ) {
+			AbstractionAtSink curAbs = absAtSinkIt.next();
+			for (AbstractionAtSink checkAbs : res)
+				if (checkAbs != curAbs
+						&& checkAbs.getSinkStmt() == curAbs.getSinkStmt()
+						&& checkAbs.getAbstraction().isImplicit() == curAbs.getAbstraction().isImplicit()
+						&& checkAbs.getAbstraction().getSourceContext() == curAbs.getAbstraction().getSourceContext())
+					if (checkAbs.getAbstraction().getAccessPath().entails(
+							curAbs.getAbstraction().getAccessPath())) {
+						absAtSinkIt.remove();
+						break;
+					}
+		}
+
+		logger.info("IFDS problem with {} forward and {} backward edges solved, "
+				+ "processing {} results...", forwardSolver.propagationCount,
+				backSolver == null ? 0 : backSolver.propagationCount,
+				res == null ? 0 : res.size());
+
+		// Force a cleanup. Everything we need is reachable through the
+		// results set, the other abstractions can be killed now.
+		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
+		forwardSolver.cleanup();
+		if (backSolver != null) {
+			backSolver.cleanup();
+			backSolver = null;
+			backProblem = null;
+		}
+		forwardSolver = null;
+		forwardProblem = null;
+		Runtime.getRuntime().gc();
+
+		if (!config.getIncrementalResultReporting()) {
+	   		builder.computeTaintPaths(res);
+	   		if (this.results == null)
+	   			this.results = builder.getResults();
+	   		else
+	   			this.results.addAll(builder.getResults());
+		}
+
+		// Wait for the path builders to terminate
+		try {
+			resultExecutor.awaitCompletion();
+		} catch (InterruptedException e) {
+			logger.error("Could not wait for executor termination", e);
+		}
+
+		if (config.getIncrementalResultReporting()) {
+			// After the last intermediate result has been computed, we need to
+			// re-process those abstractions that received new neighbors in the
+			// meantime
+			builder.runIncrementalPathCompuation();
+
+			try {
+				resultExecutor.awaitCompletion();
+			} catch (InterruptedException e) {
+				logger.error("Could not wait for executor termination", e);
+			}
+		}
+		resultExecutor.shutdown();
+
+		if (results == null || results.getResults().isEmpty())
+			logger.warn("No results found.");
+		else for (ResultSinkInfo sink : results.getResults().keySet()) {
+			logger.info("The sink {} in method {} was called with values from the following sources:",
+                    sink, iCfg.getMethodOf(sink.getSink()).getSignature() );
+			for (ResultSourceInfo source : results.getResults().get(sink)) {
+				logger.info("- {} in method {}",source, iCfg.getMethodOf(source.getSource()).getSignature());
+				if (source.getPath() != null) {
+					logger.info("\ton Path: ");
+					for (Unit p : source.getPath()) {
+						logger.info("\t -> " + iCfg.getMethodOf(p));
+						logger.info("\t\t -> " + p);
+					}
+				}
+			}
+		}
+
+		for (ResultsAvailableHandler handler : onResultsAvailable)
+			handler.onResultsAvailable(iCfg, results);
+
+		if (config.getWriteOutputFiles())
+			PackManager.v().writeOutput();
+
+		maxMemoryConsumption = Math.max(maxMemoryConsumption, getUsedMemory());
+		System.out.println("Maximum memory consumption: " + maxMemoryConsumption / 1E6 + " MB");
 	}
 
 	/**
@@ -618,185 +941,47 @@ public class Infoflow extends AbstractInfoflow {
 					getMethodsForSeedsIncremental(callee, doneSet, seeds, icfg);
 		}
 	}
-	private enum ValueLoc {
-		Left,
-		Right
-	}
 
 
+	private int scanMethodForSourcesSinksOp(
+			final ISourceSinkManager sourcesSinks,
+			InfoflowSPProblem forwardProblem,
+			SootMethod m) {
+		if (getConfig().getLogSourcesAndSinks() && collectedSources == null) {
+			collectedSources = new HashSet<>();
+			collectedSinks = new HashSet<>();
+		}
 
-	private void scanMethodDoPreAnalysis(SootMethod m, Map<SootMethod, Map<Value, Map<Pair<Unit, Value>, Pair<VariableInfo, DataFlowNode>>>> dfg) {
-
+		int sinkCount = 0;
 		if (m.hasActiveBody()) {
 			// Check whether this is a system class we need to ignore
 			final String className = m.getDeclaringClass().getName();
 			if (config.getIgnoreFlowsInSystemPackages()
 					&& SystemClassHandler.isClassInSystemPackage(className))
-				return ;
+				return sinkCount;
 
+			// Look for a source in the method. Also look for sinks. If we
+			// have no sink in the program, we don't need to perform any
+			// analysis
 			PatchingChain<Unit> units = m.getActiveBody().getUnits();
-//			logger.info("getName :" + m.getName());
-//			logger.info("getBytecodeParms :" + m.getBytecodeParms());
-//			logger.info("getSubSignature :" + m.getSubSignature());
-//			logger.info("getParameterCount :" + m.getParameterCount());
-//			logger.info("getName :" + m.getActiveBody());
-//
-			//BriefUnitGraph ug  = new BriefUnitGraph(m.getActiveBody());
-
-			//debug
-			//System.out.println(m.getActiveBody());
-
-			// first we build the basic block of the method, which is used for opt
-			// compute each index of Unit in their basic block
-			// use unitToBBMap,unitToInnerBBIndexMap to store the Map (unit -> BB , unit -> index )
-			BasicBlockGraph bbg = new BasicBlockGraph(iCfg, m) ;
-			Map<Unit, BasicBlock> unitToBBMap =  bbg.getUnitToBBMap();
-			Map<Unit, Integer> unitToInnerBBIndexMap = bbg.getUnitToIndexMap();
-
-			//bbg.computeLeaders(iCfg, m);
-
-			// foreach base
-			// 	do
-			//		for each basic block
-			//			preinfo
-
-			Map<Value , VariableInfoSet> varInfoSetGbyBaseMap = new HashMap<>();
-
-			// Collect all units' variables , store it in VariableInfo class,
-			// then group by the VariableInfo instances by their base value
-			// store them into varInfoSetGbyBaseMap HashMap
-			// [Read]   S1: b = a      ::   Base : a -> { <S1:a> }
-			// [Write]  S2: a = b      ::   Base : a -> { <S1:a> <S2:a> }
-			// [Load]   S3: c = a.f1   ::   Base : a -> { <S1:a> <S2:a> <S3:a.f1> }
-			// [Store]  S4: a.f2 = d   ::   Base : a -> { <S1:a> <S2:a> <S3:a.f1> <S4:a.f2> }
-			// [invoke] s5: foo(a.f2)  ::   Base : a -> { <S1:a> <S2:a> <S3:a.f1> <S4:a.f2> <S5:a.f2>}
 			for (Unit u : units) {
-				if(!(u instanceof Stmt))
-					continue;
-				Stmt stmt = (Stmt) u;
-				BasicBlock bb = unitToBBMap.get(u);
-				Integer innerBBIdx = unitToInnerBBIndexMap.get(u);
-
-				if(stmt instanceof AssignStmt) {
-					final AssignStmt assignStmt = (AssignStmt) stmt;
-					Value left = assignStmt.getLeftOp();
-					Value right = assignStmt.getRightOp();
-					final Value[] rightVals = BaseSelector.selectBaseList(right, true);
-
-					//get left value :
-					Value leftBase = null;
-					SootField leftField = null;
-					if(left instanceof Local) {
-						leftBase = left;
-					}else if(left instanceof FieldRef) {
-						if(left instanceof  InstanceFieldRef) {
-							//Value base = BaseSelector.selectBase(left, true);
-							leftBase = ((InstanceFieldRef) left).getBase();
-							leftField = ((InstanceFieldRef)left).getField();
-						}
-
-					}
-					if(leftBase != null) {
-						VariableInfoSet leftVariableInfoSet = null;
-						if(varInfoSetGbyBaseMap.containsKey(leftBase)){
-							leftVariableInfoSet =  varInfoSetGbyBaseMap.get(leftBase);
-						}else {
-							leftVariableInfoSet = new VariableInfoSet();
-							varInfoSetGbyBaseMap.put(leftBase, leftVariableInfoSet);
-						}
-						leftVariableInfoSet.add(new VariableInfo(left, leftField, bb, innerBBIdx, stmt, true));
-					}
-
-					//get right value :
-					Value rightBase = null;
-					SootField rightField = null;
-					for(Value rightVal : rightVals) {
-
-						if(rightVal instanceof Local) {
-							rightBase = rightVal;
-						}else if(rightVal instanceof FieldRef) {
-							if(rightVal instanceof  InstanceFieldRef) {
-								//Value base = BaseSelector.selectBase(left, true);
-								rightBase = ((InstanceFieldRef) rightVal).getBase();
-								rightField = ((InstanceFieldRef)rightVal).getField();
-							}
-
-						}
-						if(rightBase != null) {
-							VariableInfoSet rightVariableInfoSet = null;
-							if(varInfoSetGbyBaseMap.containsKey(rightBase)){
-								rightVariableInfoSet =  varInfoSetGbyBaseMap.get(rightBase);
-							}else {
-								rightVariableInfoSet = new VariableInfoSet();
-								varInfoSetGbyBaseMap.put(rightBase, rightVariableInfoSet);
-							}
-							rightVariableInfoSet.add(new VariableInfo(rightVal, rightField, bb, innerBBIdx, stmt, false));
-						}
-
-					}
-
-//					logger.info("Right :" + right.toString());
-//					logger.info("Left :" + left.toString());
-//					List<ValueBox> list = left.getUseBoxes();
-//					logger.info("valueBox: " + list);
-//					logger.info(s.toString());
-				}else if(stmt instanceof IdentityStmt) {
-
-				}else if(stmt instanceof InvokeStmt) {
-
-					final Stmt iCallStmt = (Stmt) stmt;
-					final InvokeExpr invExpr = iCallStmt.getInvokeExpr();
-
-					final Value[] callArgs = new Value[invExpr.getArgCount()];
-					for (int i = 0; i < invExpr.getArgCount(); i++) {
-						Pair<Value, SootField> args = getBaseAndField(invExpr.getArg(i));
-
-					}
-
-					//final boolean hasValidCallees = hasValidCallees(stmt);
+				Stmt s = (Stmt) u;
+				if (sourcesSinks.getSourceInfo(s, iCfg) != null) {
+					forwardProblem.addInitialSeeds(u, Collections.singleton(forwardProblem.zeroValue()));
+					if (getConfig().getLogSourcesAndSinks())
+						collectedSources.add(s);
+					logger.debug("Source found: {}", u);
 				}
-
-
-			}
-			int count = 0;
-//			for(VariableInfoSet variableInfoSet : varInfoSetGbyBaseMap.values()) {
-//				Set<Pair<VariableInfo, DataFlowNode>> res = variableInfoSet.solve(bbg.getHeads());
-//				//System.out.println(count++);
-//			}
-
-			Map<Value, Map<Pair<Unit, Value>, Pair<VariableInfo, DataFlowNode>>> baseToVarInfoMap = new HashMap<>();
-
-			for(Map.Entry<Value, VariableInfoSet> entry : varInfoSetGbyBaseMap.entrySet()) {
-				Value base = entry.getKey();
-				VariableInfoSet variableInfoSet = entry.getValue();
-				Map<Pair<Unit, Value>, Pair<VariableInfo, DataFlowNode>>  res = variableInfoSet.solve();
-				baseToVarInfoMap.put(base, res);
-
-			}
-
-			dfg.put(m, baseToVarInfoMap);
-
-
-		}
-		return ;
-	}
-
-	public Pair<Value, SootField> getBaseAndField(Value value) {
-		Value rightBase = null;
-		SootField rightField = null;
-
-		if(value instanceof Local) {
-			rightBase = value;
-		}else if(value instanceof FieldRef) {
-			if(value instanceof  InstanceFieldRef) {
-				//Value base = BaseSelector.selectBase(left, true);
-				rightBase = ((InstanceFieldRef) value).getBase();
-				rightField = ((InstanceFieldRef)value).getField();
+				if (sourcesSinks.isSink(s, iCfg, null)) {
+					sinkCount++;
+					if (getConfig().getLogSourcesAndSinks())
+						collectedSinks.add(s);
+					logger.debug("Sink found: {}", u);
+				}
 			}
 
 		}
-
-		return new Pair<>(rightBase, rightField);
+		return sinkCount;
 	}
 
 
@@ -988,6 +1173,8 @@ public class Infoflow extends AbstractInfoflow {
 		hierarchy = Scene.v().getOrMakeFastHierarchy();
 
 	}
+
+
 
 
 }

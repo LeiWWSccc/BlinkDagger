@@ -13,10 +13,10 @@ public class DataFlowNodeFactory {
 
     public static DataFlowNodeFactory v() {return instance;}
 
-    public DataFlowNode createDataFlowNode(Unit u, Value val, SootField field) {
+    public DataFlowNode createDataFlowNode(Unit u, Value val, SootField field, boolean isOverWrite) {
 
 
-        return new DataFlowNode(u, val, field);
+        return new DataFlowNode(u, val, field, isOverWrite);
     }
 
 
@@ -35,7 +35,4 @@ public class DataFlowNodeFactory {
 //        return new DataFlowNode(value);
 //    }
 
-    public DataFlowNode createDataFlowNodeFromBaseInfo (VariableInfo baseInfo) {
-        return new DataFlowNode(baseInfo.stmt, baseInfo.value, baseInfo.field);
-    }
 }

@@ -1,5 +1,6 @@
 package soot.jimple.infoflow.sparseop.dataflowgraph;
 
+import soot.NullType;
 import soot.SootField;
 import soot.Unit;
 import soot.Value;
@@ -17,19 +18,22 @@ public class DataFlowNode {
 
     private final Unit stmt;
 
-    public final static SootField baseField = new SootField("null", null);
+    public final static SootField baseField = new SootField("null",  NullType.v(), soot.Modifier.FINAL);
 
     private SootField field;
+
+    private boolean isOverWrite;
 
     public int hashCode = 0;
 
     private HashMap<SootField, Set<DataFlowNode>> succs ;
     private Set<SootField> killFields ;
 
-    DataFlowNode(Unit u, Value val, SootField f) {
+    DataFlowNode(Unit u, Value val, SootField f, boolean isLeft) {
         this.stmt = u;
         this.value = val;
         this.field = f;
+        this.isOverWrite = isLeft;
     }
 
     public SootField getField() {
@@ -38,6 +42,10 @@ public class DataFlowNode {
 
     public HashMap<SootField, Set<DataFlowNode>> getSuccs() {
         return this.succs;
+    }
+
+    public Unit getStmt() {
+        return this.stmt;
     }
 
     public void setSuccs(SootField field, DataFlowNode target) {
@@ -94,6 +102,8 @@ public class DataFlowNode {
         } else if (!field.equals(other.field))
             return false;
 
+        if(isOverWrite != other.isOverWrite)
+            return false;
 
         return true;
     }
@@ -110,6 +120,7 @@ public class DataFlowNode {
         result = prime * result + ((stmt == null) ? 0 : stmt.hashCode());
         result = prime * result + ((value == null) ? 0 : value.hashCode());
         result = prime * result + ((field == null) ? 0 : field.hashCode());
+        result = prime * result + ((isOverWrite) ? 1 : 0);
         this.hashCode = result;
 
         return this.hashCode;
