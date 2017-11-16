@@ -5,7 +5,7 @@ import soot.Value;
 import soot.jimple.Stmt;
 import soot.jimple.infoflow.sparseop.basicblock.BasicBlock;
 
-import java.util.List;
+import java.util.Set;
 
 /**
  * @author wanglei
@@ -33,11 +33,15 @@ public class BaseInfoStmt {
         this.stmt = s;
     }
 
-    public List<BaseInfoStmt> Succs = null;
+    public Set<BaseInfoStmt> Succs = null;
+    public Set<BaseInfoStmt> Preds = null;
 
     @Override
     public String toString() {
-        return "[Stmt : " + stmt + "], [Base : " + base + "]";
+        if(base == null)
+            return "RETURN STMT : " + stmt;
+
+        return "STMT{ " + stmt + " }, [Base : " + base + "]";
     }
 
 }

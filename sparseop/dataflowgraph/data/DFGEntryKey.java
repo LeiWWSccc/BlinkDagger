@@ -14,7 +14,6 @@ public class DFGEntryKey {
 
     private final Unit stmt;
 
-
     private SootField field;
 
     private final int hashCode;

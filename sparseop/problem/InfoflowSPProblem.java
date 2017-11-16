@@ -13,7 +13,6 @@ package soot.jimple.infoflow.sparseop.problem;
 import heros.solver.Pair;
 import soot.*;
 import soot.jimple.*;
-import soot.jimple.infoflow.Infoflow;
 import soot.jimple.infoflow.InfoflowManager;
 import soot.jimple.infoflow.aliasing.Aliasing;
 import soot.jimple.infoflow.aliasing.IAliasingStrategy;
@@ -25,6 +24,7 @@ import soot.jimple.infoflow.handlers.TaintPropagationHandler.FlowFunctionType;
 import soot.jimple.infoflow.problems.TaintPropagationResults;
 import soot.jimple.infoflow.sparseop.dataflowgraph.BaseInfoStmt;
 import soot.jimple.infoflow.sparseop.dataflowgraph.DataFlowNode;
+import soot.jimple.infoflow.sparseop.dataflowgraph.InnerBBFastBuildDFGSolver;
 import soot.jimple.infoflow.sparseop.dataflowgraph.data.DFGEntryKey;
 import soot.jimple.infoflow.sparseop.problem.rules.PropagationRuleManagerOp;
 import soot.jimple.infoflow.sparseop.solver.functions.SolverCallFlowFunctionOp;
@@ -397,14 +397,14 @@ public class InfoflowSPProblem extends AbstractInfoflowProblemOp {
 			private Set<Pair<DataFlowNode, Abstraction>> func(Value left,Unit stmt, Set<Abstraction> input) {
 
 				Set<Pair<DataFlowNode, Abstraction>> res = new HashSet<>();
-				Pair<Value, SootField> pair = Infoflow.getBaseAndField(left);
+				Pair<Value, SootField> pair = InnerBBFastBuildDFGSolver.getBaseAndField(left);
 				SootField field = pair.getO2();
 
 				DataFlowNode dfg = useBaseAndFieldTofindDataFlowGraph(pair.getO1(), field, stmt);
 				for(Abstraction abs : input) {
 					AccessPath ap = abs.getAccessPath();
 					SootField firstField = ap.getFirstField();
-					if(dfg.getSuccs() != null) {
+					if(dfg != null && dfg.getSuccs() != null) {
 						Set<DataFlowNode> next = dfg.getSuccs().get(DataFlowNode.baseField);
 						if(next != null)
 							for(DataFlowNode d : next) {
@@ -780,11 +780,18 @@ public class InfoflowSPProblem extends AbstractInfoflowProblemOp {
 //				return new Pair<>(dfg, input);
 //			}
 			Set<Pair<DataFlowNode, Abstraction>> callHelper(Value op , Unit stmt , Abstraction input) {
-				DataFlowNode dfg = useValueTofindDataFlowGraph(op, stmt);
-				Set<DataFlowNode> nextSet = dfg.getSuccs().get(dfg.getField());
 				Set<Pair<DataFlowNode, Abstraction>> res = new HashSet<>();
-				for(DataFlowNode next : nextSet) {
-					res.add(new Pair<>(next, input));
+
+				DataFlowNode dfg = useValueTofindDataFlowGraph(op, stmt);
+				if(dfg != null) {
+					if(dfg.getSuccs() != null) {
+						Set<DataFlowNode> nextSet = dfg.getSuccs().get(dfg.getField());
+						if(nextSet != null) {
+							for(DataFlowNode next : nextSet) {
+								res.add(new Pair<>(next, input));
+							}
+						}
+					}
 				}
 				return res;
 			}
@@ -1135,7 +1142,7 @@ public class InfoflowSPProblem extends AbstractInfoflowProblemOp {
 
 	private DataFlowNode useValueTofindDataFlowGraph(Value value, Unit stmt) {
 		SootMethod caller = manager.getICFG().getMethodOf(stmt);
-		Pair<Value, SootField> pair = Infoflow.getBaseAndField(value);
+		Pair<Value, SootField> pair = InnerBBFastBuildDFGSolver.getBaseAndField(value);
 		return useBaseAndFieldTofindDataFlowGraph(pair.getO1(), pair.getO2(), stmt);
 	}
 

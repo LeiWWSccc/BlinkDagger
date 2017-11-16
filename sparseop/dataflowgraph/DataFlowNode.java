@@ -1,9 +1,6 @@
 package soot.jimple.infoflow.sparseop.dataflowgraph;
 
-import soot.NullType;
-import soot.SootField;
-import soot.Unit;
-import soot.Value;
+import soot.*;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,6 +31,10 @@ public class DataFlowNode {
         this.value = val;
         this.field = f;
         this.isOverWrite = isLeft;
+    }
+
+    public Value getValue() {
+        return value;
     }
 
     public SootField getField() {
@@ -67,6 +68,10 @@ public class DataFlowNode {
         if(killFields == null)
             killFields = new HashSet<>();
         killFields.add(field);
+    }
+
+    public Set<SootField> getKillFields() {
+        return killFields;
     }
 
     @Override
@@ -124,6 +129,25 @@ public class DataFlowNode {
         this.hashCode = result;
 
         return this.hashCode;
+    }
+
+    public DataFlowNode clone() {
+        DataFlowNode newNode = new DataFlowNode(stmt, value, field, isOverWrite);
+        return newNode;
+    }
+
+    public String toString() {
+        if(value == null) {
+            return "RETURN Stmt :" + stmt;
+        }
+        String fs ;
+        if(field == DataFlowNode.baseField)
+            fs = "NULL";
+        else
+            fs = field.toString();
+
+
+        return "STMT{ " + stmt + " }, BASE{ " + value + " }, FIELD{ " + fs +" }";
     }
 
 //    public void setSuccs(DataFlowNode source, SootField field, DataFlowNode target) {

@@ -26,19 +26,35 @@ public class InnerBBFastBuildDFGSolver {
     private IInfoflowCFG iCfg;
     protected InfoflowConfiguration config = new InfoflowConfiguration();
 
+    Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> dfg = new HashMap<>();
+
+    Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> backwardDfg = new HashMap<>();
+
+    Map<SootMethod,  Map<Value, Map<DFGEntryKey, Set<DataFlowNode>>>> returnInfo = new HashMap<>();
+
     public InnerBBFastBuildDFGSolver(IInfoflowCFG iCfg ) {
         this.iCfg = iCfg;
     }
 
-    public Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> solve() {
-
-
-        Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> dfg = new HashMap<>();
-
-        for (SootMethod sm : getMethodsForSeeds(iCfg))
-            scanMethodDoPreAnalysis(sm, dfg);
+    public Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> getDfg() {
         return dfg;
     }
+
+    public Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> getBackwardDfg() {
+        return backwardDfg;
+    }
+
+    public  Map<SootMethod,  Map<Value, Map<DFGEntryKey, Set<DataFlowNode>>>> getReturnInfo() {
+        return returnInfo;
+    }
+
+    final public static String[] debugFunc = {"main"};
+
+    public void solve() {
+        for (SootMethod sm : getMethodsForSeeds(iCfg))
+            buildDFGForeachSootMethod(sm);
+    }
+
 
     private enum ValueType {
         Left,
@@ -46,26 +62,7 @@ public class InnerBBFastBuildDFGSolver {
         Arg
     }
 
-
-
-    public static Pair<Value, SootField> getBaseAndField(Value value) {
-        Value rightBase = null;
-        SootField rightField = null;
-
-        if(value instanceof Local) {
-            rightBase = value;
-        }else if(value instanceof FieldRef) {
-            if(value instanceof  InstanceFieldRef) {
-                //Value base = BaseSelector.selectBase(left, true);
-                rightBase = ((InstanceFieldRef) value).getBase();
-                rightField = ((InstanceFieldRef)value).getField();
-            }
-
-        }
-        return new Pair<>(rightBase, rightField);
-    }
-
-    private void scanMethodDoPreAnalysis(SootMethod m, Map<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> dfg) {
+    private void buildDFGForeachSootMethod(SootMethod m) {
 
         if (m.hasActiveBody()) {
             // Check whether this is a system class we need to ignore
@@ -84,7 +81,11 @@ public class InnerBBFastBuildDFGSolver {
             //BriefUnitGraph ug  = new BriefUnitGraph(m.getActiveBody());
 
             //debug
-            System.out.println(m.getActiveBody());
+            for(String func :debugFunc) {
+                if(m.getActiveBody().toString().contains(func))
+                    System.out.println(m.getActiveBody());
+            }
+            //System.out.println(m.getActiveBody());
 
             // first we build the basic block of the method, which is used for opt
             // compute each index of Unit in their basic block
@@ -93,15 +94,32 @@ public class InnerBBFastBuildDFGSolver {
             Map<Unit, BasicBlock> unitToBBMap =  bbg.getUnitToBBMap();
             Map<Unit, Integer> unitToInnerBBIndexMap = bbg.getUnitToIndexMap();
             List<BasicBlock> bbgTails = bbg.getTails();
+            List<BasicBlock> bbgHeads = bbg.getHeads();
+
+            List<BaseInfoStmt> headStmtList = new ArrayList<>();
+            for(BasicBlock bb  : bbgTails) {
+                if(bb.getPreds().size() == 0) {
+                    Unit head = bb.getHead();
+                    Integer innerBBIdx = unitToInnerBBIndexMap.get(head);
+                    BaseInfoStmt headStmt = BaseInfoStmtFactory.v().
+                            createVariableInfo(null, null, null, null, bb, innerBBIdx, head);
+                    headStmtList.add(headStmt);
+                }
+            }
 
             List<BaseInfoStmt> returnStmtList = new ArrayList<>();
             for(BasicBlock bb  : bbgTails) {
-                Unit tail = bb.getTail();
-                Integer innerBBIdx = unitToInnerBBIndexMap.get(tail);
-                BaseInfoStmt returnStmt = BaseInfoStmtFactory.v().
-                        createVariableInfo(null, null, null, null, bb, innerBBIdx, tail);
-                returnStmtList.add(returnStmt);
+                if(bb.getSuccs().size() == 0) {
+                    Unit tail = bb.getTail();
+                    Integer innerBBIdx = unitToInnerBBIndexMap.get(tail);
+                    BaseInfoStmt returnStmt = BaseInfoStmtFactory.v().
+                            createVariableInfo(null, null, null, null, bb, innerBBIdx, tail);
+                    returnStmtList.add(returnStmt);
+                }
             }
+
+
+            Set<Pair<Value, SootField>> paramAndThis = new HashSet<>();
 
             //bbg.computeLeaders(iCfg, m);
 
@@ -222,11 +240,13 @@ public class InnerBBFastBuildDFGSolver {
 //					logger.info(s.toString());
                 }else if(stmt instanceof IdentityStmt) {
                     IdentityStmt is = ((IdentityStmt)u);
-                    if (is.getRightOp() instanceof ParameterRef){
-                        ParameterRef pr = (ParameterRef) is.getRightOp();
+                    if (is.getRightOp() instanceof ParameterRef || is.getRightOp() instanceof ThisRef){
                         Pair<Value, SootField> pair = getBaseAndField(is.getLeftOp());
                         Value leftBase = pair.getO1();
                         SootField leftField = pair.getO2();
+
+                        paramAndThis.add(pair);
+
                         if(leftBase != null) {
                             Set<Pair<ValueType, SootField>> tmpSet = null;
                             if(baseTpEachVarInfoMap.containsKey(leftBase)) {
@@ -328,16 +348,15 @@ public class InnerBBFastBuildDFGSolver {
                     if(varInfoSetGbyBaseMap.containsKey(base)){
                         BaseInfoStmtSet =  varInfoSetGbyBaseMap.get(base);
                     }else {
-                        BaseInfoStmtSet = new BaseInfoStmtSet();
+                        BaseInfoStmtSet = new BaseInfoStmtSet(m, base, returnStmtList, paramAndThis);
                         BaseInfoStmtSet.addAll(returnStmtList);
+                        BaseInfoStmtSet.addAll(headStmtList);
                         varInfoSetGbyBaseMap.put(base, BaseInfoStmtSet);
                     }
                     BaseInfoStmtSet.add(
                             BaseInfoStmtFactory.v().createVariableInfo(base,
                                     leftField, rightFields, argsFields, bb, innerBBIdx, stmt));
-
                 }
-
 
             }
 
@@ -350,17 +369,44 @@ public class InnerBBFastBuildDFGSolver {
 
             Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> baseToVarInfoMap = new HashMap<>();
 
+            Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> backwardBaseToVarInfoMap = new HashMap<>();
+
+            Map<Value, Map<DFGEntryKey, Set<DataFlowNode>>> returnInfoMap = new HashMap<>();
+
             for(Map.Entry<Value, BaseInfoStmtSet> entry : varInfoSetGbyBaseMap.entrySet()) {
                 Value base = entry.getKey();
                 BaseInfoStmtSet baseInfoStmtSet = entry.getValue();
-                Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>  res = baseInfoStmtSet.solve();
-                baseToVarInfoMap.put(base, res);
+                Pair<Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>  resPair = baseInfoStmtSet.solve();
+                baseToVarInfoMap.put(base, resPair.getO1());
+                backwardBaseToVarInfoMap.put(base, resPair.getO2());
+                returnInfoMap.put(base, baseInfoStmtSet.getReturnInfo());
 
             }
+            printer(m, baseToVarInfoMap, backwardBaseToVarInfoMap);
+
             dfg.put(m, baseToVarInfoMap);
+            backwardDfg.put(m, backwardBaseToVarInfoMap);
+            returnInfo.put(m, returnInfoMap);
 
         }
         return ;
+    }
+
+    public static Pair<Value, SootField> getBaseAndField(Value value) {
+        Value rightBase = null;
+        SootField rightField = null;
+
+        if(value instanceof Local) {
+            rightBase = value;
+        }else if(value instanceof FieldRef) {
+            if(value instanceof  InstanceFieldRef) {
+                //Value base = BaseSelector.selectBase(left, true);
+                rightBase = ((InstanceFieldRef) value).getBase();
+                rightField = ((InstanceFieldRef)value).getField();
+            }
+
+        }
+        return new Pair<>(rightBase, rightField);
     }
 
 
@@ -399,5 +445,107 @@ public class InnerBBFastBuildDFGSolver {
                 for (SootMethod callee : icfg.getCalleesOfCallAt(stmt))
                     getMethodsForSeedsIncremental(callee, doneSet, seeds, icfg);
         }
+    }
+
+
+    public void printer(SootMethod m, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> baseToVarInfoMap ,  Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> backBaseToVarInfoMap) {
+        boolean found = false;
+        for(String func : debugFunc) {
+            if(m.getActiveBody().toString().contains(func))
+                found = true;
+        }
+        if(!found)
+            return;
+
+        System.out.println("================Forward  ==========================");
+        System.out.print(printInnerMethodBaseInfo(baseToVarInfoMap));
+        System.out.println("================Backward ==========================");
+        System.out.print(printInnerMethodBaseInfo(backBaseToVarInfoMap));
+        System.out.println("===================================================");
+
+    }
+
+    public String printDfg() {
+        if(dfg.size() == 0)
+            return "Error!";
+        StringBuilder sb = new StringBuilder();
+        for(Map.Entry<SootMethod, Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>>> entry : dfg.entrySet()) {
+            SootMethod method = entry.getKey();
+            sb.append("=============================================================\n");
+            sb.append(method.toString() + "\n");
+            sb.append("-------------------------------------------------------------\n");
+            Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> l1Dfg = entry.getValue();
+            for(Map.Entry<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> entry1 : l1Dfg.entrySet()) {
+                Value base = entry1.getKey();
+                sb.append("BASE[ " + base.toString() + " ]: \n");
+                Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>> l2Dfg = entry1.getValue();
+                sb.append(subprint(l2Dfg));
+                sb.append("\n");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    public String printInnerMethodBaseInfo(Map<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> baseinfo) {
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("-------------------------------------------------------------\n");
+        for(Map.Entry<Value, Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>>> entry1 : baseinfo.entrySet()) {
+            Value base = entry1.getKey();
+            sb.append("BASE[ " + base.toString() + " ]: \n");
+            Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>> l2Dfg = entry1.getValue();
+            sb.append(subprint(l2Dfg));
+            sb.append("\n");
+        }
+        sb.append("-------------------------------------------------------------\n");
+        return sb.toString();
+    }
+
+    private String subprint(Map<DFGEntryKey, Pair<BaseInfoStmt, DataFlowNode>> l2Dfg) {
+        StringBuilder sb = new StringBuilder();
+        Set<DataFlowNode> visited = new HashSet<>();
+        Queue<DataFlowNode> list = new LinkedList<>();
+        for(Pair<BaseInfoStmt, DataFlowNode> pair : l2Dfg.values() ) {
+            list.offer(pair.getO2());
+            visited.add(pair.getO2());
+        }
+        int count = 1 ;
+        while (!list.isEmpty()) {
+            DataFlowNode cur = list.poll();
+            sb.append("  ("+count +") ");
+            count++;
+            sb.append(cur.toString() + "\n");
+            if(cur.getSuccs() != null) {
+                for(Map.Entry<SootField, Set<DataFlowNode>> entry : cur.getSuccs().entrySet()) {
+                    SootField f = entry.getKey();
+                    String fs ;
+                    if(f == DataFlowNode.baseField)
+                        fs = "NULL";
+                    else
+                        fs = f.toString();
+
+                    sb.append("      " + fs + "  ->  \n");
+                    Set<DataFlowNode> nextSet = entry.getValue();
+                    for(DataFlowNode next : nextSet) {
+                        sb.append("         " + next + "\n");
+                        if(!visited.contains(next)) {
+                            list.offer(next);
+                            visited.add(next);
+                        }
+                    }
+                    sb.append("\n");
+
+                }
+            }
+            if(cur.getKillFields() != null) {
+                sb.append("      Kill Sets:\n");
+                sb.append("        " + cur.getKillFields().toString() + "\n");
+            }
+
+            sb.append("\n");
+
+        }
+        return sb.toString();
     }
 }

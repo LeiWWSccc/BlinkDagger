@@ -261,11 +261,13 @@ public class IFDSSpSolver<N,F,D extends FastSolverLinkedNode<D, N>,M,I extends B
 					continue;
 
 				//for each callee's start point(s)
-				for(N sP: startPointsOf) {
-					//create initial self-loop
-					//propagate(d3, sP, d3, n, false, true); //line 15
-					propagate(d3, dfg, sP, d3, n, false, true); //line 15
-				}
+//				for(N sP: startPointsOf) {
+//					//create initial self-loop
+//					//propagate(d3, sP, d3, n, false, true); //line 15
+//					propagateCall(d3, dfg, sP, d3, n, false, true); //line 15
+//				}
+
+				propagateCall(d3, dfg, null, d3, n, false, true); //line 15
 
 				//register the fact that <sp,d3> has an incoming edge from <n,d2>
 				//line 15.1 of Naeem/Lhotak/Rodriguez
@@ -547,6 +549,14 @@ public class IFDSSpSolver<N,F,D extends FastSolverLinkedNode<D, N>,M,I extends B
 							 boolean forceRegister) {
 		propagate(sourceVal, target, targetVal, relatedCallSite, isUnbalancedReturn, forceRegister);
 	}
+
+	protected void propagateCall(D sourceVal,F dfg, N target, D targetVal,
+			/* deliberately exposed to clients */ N relatedCallSite,
+			/* deliberately exposed to clients */ boolean isUnbalancedReturn,
+							 boolean forceRegister) {
+		propagate(sourceVal, target, targetVal, relatedCallSite, isUnbalancedReturn, forceRegister);
+	}
+
 
 	/**
 	 * Propagates the flow further down the exploded super graph. 

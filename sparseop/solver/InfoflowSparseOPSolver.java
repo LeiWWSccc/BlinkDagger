@@ -19,17 +19,18 @@ import soot.Value;
 import soot.jimple.infoflow.data.Abstraction;
 import soot.jimple.infoflow.solver.IFollowReturnsPastSeedsHandler;
 import soot.jimple.infoflow.solver.IInfoflowSolver;
-import soot.jimple.infoflow.solver.functions.SolverCallToReturnFlowFunction;
-import soot.jimple.infoflow.solver.functions.SolverNormalFlowFunction;
-import soot.jimple.infoflow.sparseop.dataflowgraph.DataFlowNode;
 import soot.jimple.infoflow.sparseop.dataflowgraph.BaseInfoStmt;
+import soot.jimple.infoflow.sparseop.dataflowgraph.DataFlowNode;
 import soot.jimple.infoflow.sparseop.dataflowgraph.data.DFGEntryKey;
 import soot.jimple.infoflow.sparseop.problem.AbstractInfoflowProblemOp;
+import soot.jimple.infoflow.sparseop.solver.functions.SolverCallFlowFunctionOp;
 import soot.jimple.infoflow.sparseop.solver.functions.SolverCallToReturnFlowFunctionOp;
 import soot.jimple.infoflow.sparseop.solver.functions.SolverNormalFlowFunctionOp;
+import soot.jimple.infoflow.sparseop.solver.functions.SolverReturnFlowFunctionOp;
 import soot.jimple.infoflow.sparseop.solver.heros.FlowFunctionOp;
 import soot.jimple.toolkits.ide.icfg.BiDiInterproceduralCFG;
 
+import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
 
@@ -69,25 +70,25 @@ public class InfoflowSparseOPSolver extends IFDSSpSolver<Unit,DataFlowNode , Abs
 		addIncoming(callee, d3, callSite, d1, d2);
 	}
 	
-//	@Override
-//	protected Set<Abstraction> computeReturnFlowFunction(
-//			FlowFunction<Abstraction> retFunction,
-//			Abstraction d1,
-//			Abstraction d2,
-//			Unit callSite,
-//			Collection<Abstraction> callerSideDs) {
-//		if (retFunction instanceof SolverReturnFlowFunction) {
-//			// Get the d1s at the start points of the caller
-//			return ((SolverReturnFlowFunction) retFunction).computeTargets(d2, d1, callerSideDs);
-//		}
-//		else
-//			return retFunction.computeTargets(d2);
-//	}
+	@Override
+	protected Set<Pair<DataFlowNode, Abstraction>> computeReturnFlowFunction(
+			FlowFunctionOp<DataFlowNode, Abstraction> retFunction,
+			Abstraction d1,
+			Abstraction d2,
+			Unit callSite,
+			Collection<Abstraction> callerSideDs) {
+		if (retFunction instanceof SolverReturnFlowFunctionOp) {
+			// Get the d1s at the start points of the caller
+			return ((SolverReturnFlowFunctionOp) retFunction).computeTargets(d2, d1, callerSideDs);
+		}
+		else
+			return retFunction.computeTargets(d2);
+	}
 
 	@Override
 	protected Set<Pair<DataFlowNode, Abstraction>> computeNormalFlowFunction
 			(FlowFunctionOp<DataFlowNode, Abstraction> flowFunction, Abstraction d1, Abstraction d2) {
-		if (flowFunction instanceof SolverNormalFlowFunction)
+		if (flowFunction instanceof SolverNormalFlowFunctionOp)
 			return ((SolverNormalFlowFunctionOp) flowFunction).computeTargets(d1, d2);
 		else
 			return flowFunction.computeTargets(d2);
@@ -96,20 +97,20 @@ public class InfoflowSparseOPSolver extends IFDSSpSolver<Unit,DataFlowNode , Abs
 	@Override
 	protected Set<Pair<DataFlowNode, Abstraction>> computeCallToReturnFlowFunction
 			(FlowFunctionOp<DataFlowNode, Abstraction> flowFunction, Abstraction d1, Abstraction d2) {
-		if (flowFunction instanceof SolverCallToReturnFlowFunction)
+		if (flowFunction instanceof SolverCallToReturnFlowFunctionOp)
 			return ((SolverCallToReturnFlowFunctionOp) flowFunction).computeTargets(d1, d2);
 		else
 			return flowFunction.computeTargets(d2);		
 	}
 
-//	@Override
-//	protected Set<Abstraction> computeCallFlowFunction
-//			(FlowFunction<Abstraction> flowFunction, Abstraction d1, Abstraction d2) {
-//		if (flowFunction instanceof SolverCallFlowFunction)
-//			return ((SolverCallFlowFunction) flowFunction).computeTargets(d1, d2);
-//		else
-//			return flowFunction.computeTargets(d2);
-//	}
+	@Override
+	protected Set<Pair<DataFlowNode, Abstraction>> computeCallFlowFunction
+			(FlowFunctionOp<DataFlowNode, Abstraction> flowFunction, Abstraction d1, Abstraction d2) {
+		if (flowFunction instanceof SolverCallFlowFunctionOp)
+			return ((SolverCallFlowFunctionOp) flowFunction).computeTargets(d1, d2);
+		else
+			return flowFunction.computeTargets(d2);
+	}
 	
 	@Override
 	public void cleanup() {
@@ -143,6 +144,14 @@ public class InfoflowSparseOPSolver extends IFDSSpSolver<Unit,DataFlowNode , Abs
 	@Override
 	public void setFollowReturnsPastSeedsHandler(IFollowReturnsPastSeedsHandler handler) {
 		this.followReturnsPastSeedsHandler = handler;
+	}
+
+	protected void propagate(Abstraction sourceVal,DataFlowNode dataFlowNode, Unit target, Abstraction targetVal,
+			/* deliberately exposed to clients */ Unit relatedCallSite,
+			/* deliberately exposed to clients */ boolean isUnbalancedReturn) {
+		if(dataFlowNode == null)
+			return;
+		super.propagate(sourceVal, dataFlowNode.getStmt(), targetVal, relatedCallSite , isUnbalancedReturn, false);
 	}
 
 

@@ -16,36 +16,40 @@ public class BaseInfoStmtCFG implements DirectedGraph {
         this.bbToBaseInfoMap = bbToBaseInfoMap;
     }
 
-    public void solve1(List<BasicBlock> heads) {
-        Set<BasicBlock> visited = new HashSet<>();
-        for(BasicBlock head : heads) {
-            dfs(head, null, visited);
-        }
-    }
-    private void dfs(BasicBlock bb, BaseInfoStmt pre, Set<BasicBlock> visited) {
-        if(visited.contains(bb))
-            return ;
-        visited.add(bb);
-        Pair<BaseInfoStmt, BaseInfoStmt> ret = innerBasicBlock(bb);
-        BaseInfoStmt tail = null;
-        if(ret == null) {
-            tail = pre;
-        }else {
-            tail = ret.getO2();
-        }
-
-        if(pre != null && ret != null) {
-            if(pre.Succs == null)
-                pre.Succs = new ArrayList<>();
-                pre.Succs.add(ret.getO1());
-
-        }
-
-        for(BasicBlock succ : bb.getSuccs()) {
-            dfs(succ, tail, visited);
-        }
-
-    }
+//    public void solve1(List<BasicBlock> heads) {
+//        Set<BasicBlock> visited = new HashSet<>();
+//        for(BasicBlock head : heads) {
+//            dfs(head, null, visited);
+//        }
+//    }
+//    private void dfs(BasicBlock bb, BaseInfoStmt pre, Set<BasicBlock> visited) {
+//        if(visited.contains(bb))
+//            return ;
+//        visited.add(bb);
+//        Pair<BaseInfoStmt, BaseInfoStmt> ret = innerBasicBlock(bb);
+//        BaseInfoStmt tail = null;
+//        if(ret == null) {
+//            tail = pre;
+//        }else {
+//            tail = ret.getO2();
+//        }
+//
+//        if(pre != null && ret != null) {
+//            if(pre.Succs == null)
+//                pre.Succs = new HashSet<>();
+//            pre.Succs.add(ret.getO1());
+//
+//            if(ret.getO1().Preds == null)
+//                ret.getO1().Preds = new HashSet<>();
+//            ret.getO1().Preds.add(pre);
+//
+//        }
+//
+//        for(BasicBlock succ : bb.getSuccs()) {
+//            dfs(succ, tail, visited);
+//        }
+//
+//    }
 
     public void solve() {
         Map<BasicBlock, Pair<BaseInfoStmt, BaseInfoStmt> > result = new HashMap<>();
@@ -86,8 +90,13 @@ public class BaseInfoStmtCFG implements DirectedGraph {
         }
         if(ret != null ) {
             if(preTail.Succs == null)
-                preTail.Succs = new ArrayList<>();
+                preTail.Succs = new HashSet<>();
             preTail.Succs.add(ret.getO1());
+
+            if(ret.getO1().Preds == null)
+                ret.getO1().Preds = new HashSet<>();
+            ret.getO1().Preds.add(preTail);
+
             return;
         }
 
@@ -116,16 +125,20 @@ public class BaseInfoStmtCFG implements DirectedGraph {
         BaseInfoStmt tail = null;
         BaseInfoStmt pre = null;
         for(int i = 0; i < col.size(); i++) {
+            BaseInfoStmt cur = col.get(i);
             if(i == 0) {
-                head = col.get(i);
+                head = cur;
             }
             if(i == col.size() - 1) {
-                tail = col.get(i);
+                tail = cur;
             }
             if(pre != null) {
                 if(pre.Succs == null)
-                    pre.Succs = new ArrayList<>();
+                    pre.Succs = new HashSet<>();
+                if(cur.Preds == null)
+                    cur.Preds = new HashSet<>();
                 pre.Succs.add(col.get(i));
+                cur.Preds.add(pre);
 
             }
             pre = col.get(i);
